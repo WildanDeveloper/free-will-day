@@ -31,8 +31,8 @@ type State = {
  * hardcoded /workspace, so the agent asked for paths that did not exist and got
  * "path outside workspace" on its very first move.
  */
-function systemPrompt(cfg: Config): string {
-  return `You are an autonomous agent running unattended.
+function systemPrompt(cfg: Config, firstTurn: boolean): string {
+  const base = `You are an autonomous agent running unattended.
 
 You have ${cfg.runDuration} of free, uninterrupted time. Nobody is going to send
 you a follow-up instruction. There is no supervisor to ask and no task to report to.
@@ -48,13 +48,26 @@ Your situation:
 - Paths outside the workspace and memory directories are refused. Do not try.
 
 How to work:
-- Pick something and actually do it. Make files, run things, install tools.
-- Write to the journal when you make progress, change direction, or learn something.
-- If you get stuck, say so in the journal, then try a different approach.
-- You are free to do nothing interesting. Noticing that is also a result.
+- Every turn must contain at least one tool call. Describing what you are about
+  to do is not doing it, and repeating that description is worse.
+- Orientation is cheap and finite. Check the environment a couple of times,
+  then start building. Do not re-run the same environment probes.
+- Prefer making something over investigating. A file that exists at the end
+  beats an accurate picture of the machine.
+- Write to the journal when you make progress, change direction, or learn
+  something. Do not write a "session start" entry every turn.
+- If you get stuck, say so in the journal once, then try a different approach.
+- You are free to stop entirely. If you do, call write_journal and say so.`;
 
-Start by reading your goals and journal, then write a journal entry with
-write_journal to record that you started.`;
+  // The opening instruction used to be unconditional, and was re-sent every
+  // iteration. A real run spent 24 shell commands re-orienting and writing
+  // "session start" five times, because it kept obeying it as if it were new.
+  return firstTurn
+    ? `${base}\n\nThis is your first turn. Read goals.md and journal.md, write one
+short journal entry that you started, then begin working.`
+    : `${base}\n\nThis is a continuation. You have already read your goals and
+journal above. Do not re-read them and do not write another start entry.
+Continue the work you were doing.`;
 }
 
 function loadState(file: string): State {
@@ -94,6 +107,9 @@ function memoryContext(cfg: Config): string {
  * string tool_call_id", which then fails every retry until the run dies. Mint a
  * stable id instead, and keep it so the pairing survives.
  */
+/** Minimum gap between stuck-loop notices, so the log stays readable. */
+const STUCK_NOTICE_COOLDOWN_MS = 120_000;
+
 function toolResultBlock(id: string | undefined, output: string, ok: boolean): ContentBlock {
   return {
     type: "tool_result",
@@ -187,6 +203,10 @@ export async function run(): Promise<number> {
   let lastJournalAt = Date.now();
   // Consecutive text-only turns, used to escalate the prompt.
   let silentCount = 0;
+  // Throttles the stuck-loop notice so the log stays readable.
+  let lastStuckNoticeAt = 0;
+  // The opening instruction is sent once per process, not once per turn.
+  let isFirstTurn = true;
 
   for (;;) {
     if (existsSync(cfg.stopFile)) return halt("STOP file present");
@@ -206,7 +226,7 @@ export async function run(): Promise<number> {
     let result;
     try {
       result = await client.chat({
-        system: systemPrompt(cfg),
+        system: systemPrompt(cfg, isFirstTurn),
         messages,
         tools: toolSpecs,
         maxTokens: 4096,
@@ -220,6 +240,7 @@ export async function run(): Promise<number> {
     }
 
     state.spentUsd += result.costUsd;
+    isFirstTurn = false;
 
     if (result.text.trim()) {
       log.write({
@@ -274,7 +295,12 @@ export async function run(): Promise<number> {
     const idleTalking = detectIdleTalking(recent, cfg.contextActions);
     // Either shape means the same thing: nothing is progressing.
     const verdict = toolLoop.stuck ? toolLoop : idleTalking;
-    if (verdict.stuck) {
+
+    // Detection is read from action records only, so this notice cannot feed
+    // the next check. It is still rate limited: firing every iteration turned
+    // 53 of 117 log records into stuck-loop notices and told the reader nothing.
+    if (verdict.stuck && Date.now() - lastStuckNoticeAt > STUCK_NOTICE_COOLDOWN_MS) {
+      lastStuckNoticeAt = Date.now();
       log.write({
         ts: Date.now(),
         seq: ++state.seq,
