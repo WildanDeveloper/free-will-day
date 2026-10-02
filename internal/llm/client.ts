@@ -52,29 +52,66 @@ export class ModelClient {
     this.cfg = cfg;
   }
 
-  /** Authorization header value, honouring basic auth when configured. */
-  private authHeader(): Record<string, string> {
+  /**
+   * Auth plus any provider-specific headers. OpenRouter rejects requests
+   * without HTTP-Referer and X-Title, and other gateways ignore them, so they
+   * are always sent.
+   */
+  private headers(): Record<string, string> {
     const { modelBasicUser, modelBasicPass, modelApiKey, modelStyle } = this.cfg;
+
+    let auth: Record<string, string>;
     if (modelBasicUser) {
-      const raw = `${modelBasicUser}:${modelBasicPass}`;
-      const encoded = Buffer.from(raw, "utf8").toString("base64");
-      return { Authorization: `Basic ${encoded}` };
+      const encoded = Buffer.from(`${modelBasicUser}:${modelBasicPass}`, "utf8").toString("base64");
+      auth = { Authorization: `Basic ${encoded}` };
+    } else if (modelStyle === "anthropic") {
+      auth = { "x-api-key": modelApiKey };
+    } else {
+      auth = { Authorization: `Bearer ${modelApiKey}` };
     }
-    if (modelStyle === "anthropic") {
-      return { "x-api-key": modelApiKey };
-    }
-    return { Authorization: `Bearer ${modelApiKey}` };
+
+    return {
+      ...auth,
+      "HTTP-Referer": this.cfg.httpReferer,
+      "X-Title": this.cfg.xTitle,
+    };
   }
 
-  private url(path: string): string {
-    const base = this.cfg.modelBaseUrl.replace(/\/+$/, "");
-    if (!base) {
-      throw new Error(
-        "model: MODEL_BASE_URL is empty. Set it explicitly, even for hosted providers.",
-      );
-    }
-    return `${base}${path}`;
+  /**
+ * Resolve an endpoint path against the configured base.
+ *
+ * Providers disagree about whether the base includes /v1, so a caller can pass
+ * either a base plus a path ("https://openrouter.ai/api/v1" + "/chat/completions")
+ * or a full URL, and the path is only appended when it is not already there.
+ * This is what stops OpenRouter returning 404 for a doubled /v1.
+ */
+private url(path: string, knownSuffixes: string[]): string {
+  const base = this.cfg.modelBaseUrl.replace(/\/+$/, "");
+  if (!base) {
+    throw new Error(
+      "model: MODEL_BASE_URL is empty. Set it explicitly, even for hosted providers.",
+    );
   }
+
+  const cleanPath = path.replace(/^\/+/, "");
+  const bare = cleanPath.replace(/^v1\//, "");
+
+  // Base already ends in the full endpoint: nothing to append.
+  for (const suffix of knownSuffixes) {
+    const tail = suffix.replace(/^\/+/, "");
+    if (tail && base.endsWith(`/${tail}`)) return base;
+  }
+
+  // Base ends in the endpoint without the version prefix.
+  if (bare && base.endsWith(`/${bare}`)) return base;
+
+  // Base already carries the /v1 prefix, so append only the bare path. Without
+  // this, "https://host/api/v1" plus "/v1/chat/completions" yields /v1/v1 and
+  // the provider answers 404.
+  // "/api" on its own is not a version prefix, so it still gets the full path.
+  const baseHasVersion = /\/(v\d+|compatible-mode\d*|openai)$/.test(base);
+  return baseHasVersion ? `${base}/${bare}` : `${base}/${cleanPath}`;
+}
 
   /** Cost from the usage field, not from string length. */
   private price(inputTokens: number, outputTokens: number): number {
@@ -92,9 +129,22 @@ export class ModelClient {
   }
 
   private async chatAnthropic(req: ChatRequest): Promise<ChatResult> {
+    // A text block with a missing text field is rejected outright by the provider
+    // with "text content parts must carry a string", so normalise defensively.
+    const asBlocks = (content: Message["content"]): ContentBlock[] =>
+      typeof content === "string"
+        ? content.length > 0
+          ? [{ type: "text", text: content }]
+          : []
+        : content.map((block) =>
+            block.type === "text"
+              ? { type: "text", text: typeof block.text === "string" ? block.text : "" }
+              : block,
+          );
+
     const messages = req.messages.map((m) => ({
       role: m.role,
-      content: typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content,
+      content: asBlocks(m.content),
     }));
 
     // tools is always sent, as an empty array when there are none. Omitting the
@@ -112,12 +162,12 @@ export class ModelClient {
       })),
     };
 
-    const res = await fetch(this.url("/v1/messages"), {
+    const res = await fetch(this.url("/v1/messages", ["/v1/messages", "/messages"]), {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "anthropic-version": ANTHROPIC_VERSION,
-        ...this.authHeader(),
+        ...this.headers(),
       },
       body: JSON.stringify(body),
     });
@@ -164,28 +214,44 @@ export class ModelClient {
         messages.push({ role: m.role, content: m.content });
         continue;
       }
+
+      // A tool result may only exist to satisfy a call, and providers reject a
+      // role:"tool" message whose tool_call_id is missing or empty. Dropping it
+      // is better than sending a request that fails forever.
+      const seenIds = new Set<string>();
       for (const block of m.content) {
-        if (block.type === "text") {
-          messages.push({ role: m.role, content: block.text });
-        } else if (block.type === "tool_use") {
+        if (block.type === "tool_result") {
+          if (block.tool_use_id && block.tool_use_id.length > 0) {
+            messages.push({
+              role: "tool",
+              tool_call_id: block.tool_use_id,
+              content: block.content,
+            });
+          }
+          continue;
+        }
+
+        if (block.type === "tool_use") {
+          // The id must round-trip: it is what pairs the result to this call.
+          const id = block.id && block.id.length > 0 ? block.id : `local_${block.name}_${seenIds.size}`;
+          seenIds.add(id);
           messages.push({
             role: "assistant",
             content: null,
             tool_calls: [
               {
-                id: block.id,
+                id,
                 type: "function",
                 function: { name: block.name, arguments: JSON.stringify(block.input) },
               },
             ],
           });
-        } else {
-          messages.push({
-            role: "tool",
-            tool_call_id: block.tool_use_id,
-            content: block.content,
-          });
+          continue;
         }
+
+        // Providers reject a text part whose text is missing or not a string, which
+        // happens when a response carries null content alongside tool calls.
+        messages.push({ role: m.role, content: typeof block.text === "string" ? block.text : "" });
       }
     }
 
@@ -204,11 +270,11 @@ export class ModelClient {
       })),
     };
 
-    const res = await fetch(this.url("/v1/chat/completions"), {
+    const res = await fetch(this.url("/v1/chat/completions", ["/v1/chat/completions", "/chat/completions"]), {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...this.authHeader(),
+        ...this.headers(),
       },
       body: JSON.stringify(body),
     });

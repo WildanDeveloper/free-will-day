@@ -25,3 +25,6 @@ node_modules/
 
 # Internal planning document, kept out of the public repo.
 road.md
+
+# Soak run artifacts: logs, journals, and reports from long unattended runs.
+soak/

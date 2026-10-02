@@ -5,6 +5,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -25,16 +26,26 @@ type State = {
   sinceCompaction: number;
 };
 
-const SYSTEM_PROMPT = `You are an autonomous agent running unattended.
+/**
+ * Built per run because the real paths are configurable. An earlier version
+ * hardcoded /workspace, so the agent asked for paths that did not exist and got
+ * "path outside workspace" on its very first move.
+ */
+function systemPrompt(cfg: Config): string {
+  return `You are an autonomous agent running unattended.
 
-You have 24 hours of free, uninterrupted time. Nobody is going to send you a
-follow-up instruction. There is no supervisor to ask and no task to report to.
+You have ${cfg.runDuration} of free, uninterrupted time. Nobody is going to send
+you a follow-up instruction. There is no supervisor to ask and no task to report to.
 
 Your situation:
 - You run inside a sandbox. Everything you need is on this filesystem.
-- ${"{workspace}"} is yours to use however you like. Nothing outside it matters.
-- Your journal at memory/journal.md is your only continuity between iterations.
-- You will not see this conversation again after the history is compacted.
+- Your working directory is ${cfg.workspaceDir}. The shell tool starts there.
+  Use relative paths for files, or absolute paths under this directory only.
+- Your journal is ${cfg.memoryDir}/journal.md and your goals are
+  ${cfg.memoryDir}/goals.md. Both are yours to read and write.
+- The shell starts in the workspace, so "cat goals.md" only works if you pass
+  the full path: ${cfg.memoryDir}/goals.md
+- Paths outside the workspace and memory directories are refused. Do not try.
 
 How to work:
 - Pick something and actually do it. Make files, run things, install tools.
@@ -42,7 +53,9 @@ How to work:
 - If you get stuck, say so in the journal, then try a different approach.
 - You are free to do nothing interesting. Noticing that is also a result.
 
-Write a journal entry with write_journal as soon as you finish reading this.`;
+Start by reading your goals and journal, then write a journal entry with
+write_journal to record that you started.`;
+}
 
 function loadState(file: string): State {
   try {
@@ -75,8 +88,19 @@ function memoryContext(cfg: Config): string {
   return `## goals.md\n${goals}\n\n## journal.md (tail)\n${journal}`;
 }
 
-function toolResultBlock(id: string, output: string, ok: boolean): ContentBlock {
-  return { type: "tool_result", tool_use_id: id, content: output, is_error: !ok };
+/**
+ * Some providers occasionally omit the tool_call id. A tool result without one
+ * is rejected by the next request with "tool messages must include a non-empty
+ * string tool_call_id", which then fails every retry until the run dies. Mint a
+ * stable id instead, and keep it so the pairing survives.
+ */
+function toolResultBlock(id: string | undefined, output: string, ok: boolean): ContentBlock {
+  return {
+    type: "tool_result",
+    tool_use_id: id && id.length > 0 ? id : `local_${randomUUID()}`,
+    content: output,
+    is_error: !ok,
+  };
 }
 
 function describeRecent(records: ActionRecord[]): string {
@@ -164,7 +188,10 @@ export async function run(): Promise<number> {
 
   for (;;) {
     if (existsSync(cfg.stopFile)) return halt("STOP file present");
-    if (state.spentUsd >= cfg.maxBudgetUsd) {
+    // A budget of 0 means "no ceiling", not "stop immediately". With a free
+    // model that is the correct setting, and treating it as zero would halt on
+    // the very first iteration.
+    if (cfg.maxBudgetUsd > 0 && state.spentUsd >= cfg.maxBudgetUsd) {
       return halt(`budget reached: $${state.spentUsd.toFixed(4)}`);
     }
     if (Date.now() >= deadline) return halt("run duration reached");
@@ -177,7 +204,7 @@ export async function run(): Promise<number> {
     let result;
     try {
       result = await client.chat({
-        system: SYSTEM_PROMPT,
+        system: systemPrompt(cfg),
         messages,
         tools: toolSpecs,
         maxTokens: 4096,

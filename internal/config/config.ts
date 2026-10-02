@@ -46,6 +46,9 @@ export type Config = {
   /** Optional basic auth for a custom endpoint. */
   modelBasicUser: string;
   modelBasicPass: string;
+  /** OpenRouter asks for both of these on every request. */
+  httpReferer: string;
+  xTitle: string;
   /** USD per 1M tokens, used to price the usage field. */
   priceInputPerM: number;
   priceOutputPerM: number;
@@ -114,6 +117,8 @@ export function loadConfig(): Config {
     modelStyle: (env("MODEL_STYLE") || "anthropic") as ModelStyle,
     modelBasicUser: env("MODEL_BASIC_USER"),
     modelBasicPass: env("MODEL_BASIC_PASS"),
+    httpReferer: env("MODEL_HTTP_REFERER") || "https://github.com/WildanDeveloper/free-will-day",
+    xTitle: env("MODEL_X_TITLE") || "Free Will Day",
     priceInputPerM: num("PRICE_INPUT_PER_M", 3),
     priceOutputPerM: num("PRICE_OUTPUT_PER_M", 15),
 

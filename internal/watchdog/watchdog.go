@@ -126,7 +126,7 @@ func (w *Watchdog) once() {
 			fmt.Sprintf("Repeated tool usage detected: %v", check.RepeatedTool), "loop")
 	}
 
-	overAlert := check.BudgetUsed > w.cfg.CostAlertUSD
+	overAlert := w.cfg.CostAlertUSD > 0 && check.BudgetUsed > w.cfg.CostAlertUSD
 	if overAlert && !w.prevOverAlert {
 		w.logger.Printf("watchdog: spend $%.4f is above the alert threshold $%.2f",
 			check.BudgetUsed, w.cfg.CostAlertUSD)
@@ -159,7 +159,7 @@ func (w *Watchdog) Check() Check {
 	check := Check{
 		BudgetUsed:  totals.CostUSD,
 		BudgetLimit: w.cfg.MaxBudgetUSD,
-		OverBudget:  totals.CostUSD >= w.cfg.MaxBudgetUSD,
+		OverBudget:  w.cfg.MaxBudgetUSD > 0 && totals.CostUSD >= w.cfg.MaxBudgetUSD,
 		RepeatedTool: database.RepeatedTools(
 			w.store.Tail(200), 40,
 		),
