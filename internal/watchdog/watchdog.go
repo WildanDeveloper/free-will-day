@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
+	"freewillday/internal/alerts"
 	"freewillday/internal/config"
 	"freewillday/internal/database"
 )
@@ -20,17 +22,25 @@ type Watchdog struct {
 	cfg    config.Config
 	store  *database.Store
 	logger *log.Logger
+	notify *alerts.Notifier
 
 	startTime time.Time
 	halted    bool
 	haltWhy   string
+
+	// Previous tick's condition flags, so a persistent condition alerts once
+	// instead of every 20 seconds.
+	prevIdle      bool
+	prevRepeated  bool
+	prevOverAlert bool
 }
 
-func New(cfg config.Config, store *database.Store, logger *log.Logger) *Watchdog {
+func New(cfg config.Config, store *database.Store, logger *log.Logger, notify *alerts.Notifier) *Watchdog {
 	return &Watchdog{
 		cfg:       cfg,
 		store:     store,
 		logger:    logger,
+		notify:    notify,
 		startTime: time.Now(),
 	}
 }
@@ -46,6 +56,9 @@ type Check struct {
 	IdleMinutes  float64            `json:"idleMinutes"`
 	RepeatedTool []string           `json:"repeatedTools"`
 	CostByHour   map[string]float64 `json:"costByHour"`
+	// Tail of the most recent output, so an alert says what the agent was doing
+	// rather than just "idle".
+	LastOutput string `json:"lastOutput"`
 }
 
 // CheckStop writes the STOP file. Idempotent.
@@ -99,16 +112,32 @@ func (w *Watchdog) once() {
 		}
 	}
 
-	if check.Idle {
+	if check.Idle && !w.prevIdle {
 		w.logger.Printf("watchdog: no actions for %.0f minutes", check.IdleMinutes)
+		w.notify.NotifyAsync(alerts.LevelWarn, "agent idle",
+			fmt.Sprintf("No actions for %.0f minutes. Last output: %s",
+				check.IdleMinutes, check.LastOutput), "idle")
 	}
-	if len(check.RepeatedTool) > 0 {
+
+	repeated := len(check.RepeatedTool) > 0
+	if repeated && !w.prevRepeated {
 		w.logger.Printf("watchdog: possible stuck loop on %v", check.RepeatedTool)
+		w.notify.NotifyAsync(alerts.LevelWarn, "stuck loop",
+			fmt.Sprintf("Repeated tool usage detected: %v", check.RepeatedTool), "loop")
 	}
-	if check.BudgetUsed > w.cfg.CostAlertUSD {
+
+	overAlert := check.BudgetUsed > w.cfg.CostAlertUSD
+	if overAlert && !w.prevOverAlert {
 		w.logger.Printf("watchdog: spend $%.4f is above the alert threshold $%.2f",
 			check.BudgetUsed, w.cfg.CostAlertUSD)
+		w.notify.NotifyAsync(alerts.LevelWarn, "spend spike",
+			fmt.Sprintf("Spend $%.4f is above the $%.2f alert threshold (cap $%.2f)",
+				check.BudgetUsed, w.cfg.CostAlertUSD, w.cfg.MaxBudgetUSD), "cost")
 	}
+
+	w.prevIdle = check.Idle
+	w.prevRepeated = repeated
+	w.prevOverAlert = overAlert
 }
 
 func (w *Watchdog) halt(reason string) {
@@ -116,6 +145,11 @@ func (w *Watchdog) halt(reason string) {
 		w.halted = true
 		w.haltWhy = reason
 		w.logger.Printf("watchdog: halting, %s", reason)
+		level := alerts.LevelInfo
+		if strings.Contains(reason, "budget") {
+			level = alerts.LevelWarn
+		}
+		w.notify.NotifyAsync(level, "run halted", reason, "halt")
 	}
 }
 
@@ -144,6 +178,17 @@ func (w *Watchdog) Check() Check {
 		idle := time.Since(last)
 		check.IdleMinutes = idle.Minutes()
 		check.Idle = idle > time.Duration(w.cfg.IdleAlertMins)*time.Minute
+	}
+
+	if tail := w.store.Tail(1); len(tail) > 0 {
+		out := tail[0].Output
+		if out == "" {
+			out = tail[0].Type
+		}
+		check.LastOutput = out
+		if len(check.LastOutput) > 200 {
+			check.LastOutput = check.LastOutput[len(check.LastOutput)-200:]
+		}
 	}
 
 	return check

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"freewillday/internal/alerts"
 	"freewillday/internal/auth"
 	"freewillday/internal/config"
 	"freewillday/internal/dashboard"
@@ -36,7 +37,8 @@ func main() {
 	}
 
 	store := database.NewStore(cfg.ActionsFile, cfg.StateFile, 4<<20)
-	guard := watchdog.New(cfg, store, logger)
+	notify := alerts.New(logger)
+	guard := watchdog.New(cfg, store, logger, notify)
 
 	server, err := dashboard.NewServer(cfg, store, guard)
 	if err != nil {
@@ -83,5 +85,7 @@ func main() {
 		logger.Printf("run ended: %s", reason)
 	} else {
 		logger.Print("run ended: supervisor stopped")
+		notify.Notify(alerts.LevelInfo, "supervisor stopped",
+			"The supervisor shut down before a stop condition tripped.", "halt")
 	}
 }

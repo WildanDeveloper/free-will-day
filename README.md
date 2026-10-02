@@ -38,20 +38,25 @@ stdlib only. No `npm install` is required for a basic run: the agent uses
 
 ```bash
 cp .env.example .env      # set MODEL_API_KEY
-npm run smoke             # fake model, full loop, assertions, no cost
-npm run test:browser      # drives real headless Chromium, needs playwright
+npm run test              # all three suites
+npm run test:unit         # compaction and loop detection, no model needed
+npm run test:browser      # real headless Chromium
+npm run smoke             # full integration, 36 assertions
 ```
 
-`npm run smoke` runs 24 assertions in eight phases: a fake model drives the
-agent loop, the supervisor is built and started, then the log, journal,
-workspace output, dashboard auth, dashboard rendering, the STOP endpoint, and a
-clean halt on the STOP file are all checked. Phase 8 additionally drives the
-real browser through the loop and confirms screenshots reach the dashboard.
+`npm run smoke` runs ten phases: the agent loop against a fake model, the
+supervisor and dashboard with auth, the STOP endpoint and a clean halt, real
+compaction and stuck-loop detection inside the loop, alert webhook delivery,
+then the browser tool and screenshots end to end.
 
-`npm run test:browser` exercises the browser tool directly against a local page:
-navigate, read, type, click, relaunch after a dead page, and screenshot capture.
+`npm run test:unit` covers compaction and loop detection as pure logic, including
+the failure paths: a model that errors, an empty summary, repeated calls with
+different inputs, and interleaved actions.
 
-Neither test needs an API key, network access, or any cost.
+`npm run test:browser` drives Chromium against a local page: navigate, read,
+type, click, relaunch after a dead page, screenshot capture.
+
+No suite needs an API key, network access, or any cost.
 
 ## Running for real
 
@@ -107,6 +112,37 @@ broken, which matters over a 24 hour run.
 
 Browser tests are skipped automatically when the Playwright browser is not
 installed, so the smoke test still passes on a machine without it.
+
+## Context management
+
+The agent keeps no conversation history. Each iteration rebuilds a fresh prompt
+from durable state: `goals.md`, the journal tail, and a bounded window of recent
+actions.
+
+Every `SUMMARIZE_EVERY` actions the window is compacted for real: the model is
+asked to write a hand-off note to itself, that note goes into `journal.md` under
+an `auto summary` heading, and the window is dropped. This is what preserves
+intent over 24 hours. Silently truncating history instead is how an agent
+forgets its own goal by hour six, and `SUMMARIZE_EVERY=6` in the test suite is
+what catches that regression.
+
+## Stuck-loop detection
+
+If the same tool is called with byte-identical input `LOOP_DETECTION_THRESHOLD`
+times in a row, the next prompt gets a nudge naming the repeated tool and
+offering three ways out, one of which is writing down the blocker. Detection is
+on tool name plus input hash, so the same tool with different arguments is not
+flagged, and interleaved distinct actions are not flagged either.
+
+## Alerts
+
+Set `ALERT_WEBHOOK_URL` and the supervisor posts JSON on: a run halting, idle
+beyond `IDLE_ALERT_MINUTES`, a spend spike past `COST_ALERT_USD`, and a stuck
+loop. One payload shape covers Discord and Telegram, and `ALERT_COOLDOWN`
+(default 10m) prevents a flapping condition from flooding the channel. Alerts
+are best effort: a failed webhook is logged and never blocks the run.
+
+Without the variable, alerting is off and every call is a no-op.
 
 ## Stop conditions
 

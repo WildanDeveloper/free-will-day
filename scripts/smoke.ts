@@ -18,6 +18,7 @@ const PORT_AGENT_MODEL = 8099;
 const PORT_BROWSER_MODEL = 8097;
 const PORT_DASH = 8098;
 const PORT_SHOT_DASH = 8096;
+const PORT_ALERT_DASH = 8093;
 const PORT_PAGE = 8123;
 
 const failures: string[] = [];
@@ -77,6 +78,7 @@ await assertPortFree(PORT_AGENT_MODEL);
 await assertPortFree(PORT_BROWSER_MODEL);
 await assertPortFree(PORT_DASH);
 await assertPortFree(PORT_SHOT_DASH);
+await assertPortFree(PORT_ALERT_DASH);
 await assertPortFree(PORT_PAGE);
 
 console.log("\n1. fake model");
@@ -263,7 +265,135 @@ if (!playwrightInstalled) {
   });
   await new Promise<void>((r) => pageServer.listen(PORT_PAGE, "127.0.0.1", r));
 
-  // Separate port and a separate log dir: the phase 1 fake model is still
+  console.log("\n9. compaction and stuck-loop detection in the loop");
+// A third fake model, on its own port, that repeats one identical call forever.
+// That is exactly the pathology the loop guard has to notice.
+const PORT_GUARD_MODEL = 8095;
+await assertPortFree(PORT_GUARD_MODEL);
+
+const GUARD_LOGDIR = `${SANDBOX}/logs-guard`;
+spawn("mkdir", ["-p", `${GUARD_LOGDIR}`]);
+await sleep(100);
+
+const fakeGuard = run("node", ["scripts/fake-model.ts"], {
+  FAKE_MODEL_PORT: String(PORT_GUARD_MODEL),
+  FAKE_REPEAT_TOOL: "1",
+});
+
+let guardModelReady = false;
+for (let attempt = 0; attempt < 40 && !guardModelReady; attempt += 1) {
+  await sleep(250);
+  try {
+    guardModelReady = (await fetch(`http://127.0.0.1:${PORT_GUARD_MODEL}/`)).ok;
+  } catch {
+    // Not listening yet.
+  }
+}
+check("guard fake model reachable", guardModelReady);
+
+// SUMMARIZE_EVERY=6 forces several real compactions inside a short run, and
+// LOOP_DETECTION_THRESHOLD=3 makes the nudge fire early.
+const guardAgent = run("node", ["cmd/agent/main.ts"], {
+  MODEL_BASE_URL: `http://127.0.0.1:${PORT_GUARD_MODEL}`,
+  MODEL_API_KEY: "fake-key",
+  MODEL_STYLE: "anthropic",
+  MODEL_ID: "fake-model",
+  WORKSPACE_DIR: `${SANDBOX}/workspace`,
+  MEMORY_DIR: `${SANDBOX}/memory`,
+  LOGS_DIR: GUARD_LOGDIR,
+  STOP_FILE: `${SANDBOX}/STOP_GUARD`,
+  STATE_FILE: `${SANDBOX}/memory/state-guard.json`,
+  RUN_DURATION: "10m",
+  SLEEP_MS: "120",
+  SUMMARIZE_EVERY: "6",
+  LOOP_DETECTION_THRESHOLD: "3",
+  JOURNAL_EVERY_MINUTES: "60",
+});
+await sleep(11000);
+guardAgent.kill("SIGTERM");
+fakeGuard.kill("SIGTERM");
+await sleep(300);
+
+const guardLog = existsSync(`${GUARD_LOGDIR}/actions.jsonl`)
+  ? readFileSync(`${GUARD_LOGDIR}/actions.jsonl`, "utf8")
+  : "";
+const guardLines = guardLog.split("\n").filter(Boolean);
+
+check("guard run produced actions", guardLines.length > 5, `${guardLines.length} lines`);
+check(
+  "compaction summaries were written",
+  guardLog.includes('"type":"summary"'),
+  `${(guardLog.match(/"type":"summary"/g) ?? []).length} summaries`,
+);
+check(
+  "stuck loop was detected",
+  guardLog.includes("stuck loop:"),
+  "nudge recorded in the log",
+);
+
+const guardState = existsSync(`${SANDBOX}/memory/state-guard.json`)
+  ? readFileSync(`${SANDBOX}/memory/state-guard.json`, "utf8")
+  : "";
+// The counter resets to 0 on a successful compaction and then climbs again, so
+// a value at or just under the threshold proves the reset happened. An earlier
+// assertion wrongly required it to be strictly below the threshold and failed
+// on a perfectly correct value.
+const counter = Number(guardState.match(/"sinceCompaction":\s*(\d+)/)?.[1] ?? "-1");
+check(
+  "compaction counter resets",
+  counter >= 0 && counter < 7,
+  `sinceCompaction=${counter} (threshold 6)`,
+);
+check(
+  "summaries are recorded in state, not just the log",
+  guardLog.includes('"type":"summary"'),
+  `${(guardLog.match(/"type":"summary"/g) ?? []).length} summary records`,
+);
+
+console.log("\n10. alert webhook");
+const PORT_ALERT_SINK = 8094;
+await assertPortFree(PORT_ALERT_SINK);
+const received: string[] = [];
+const alertSink = createServer((req, res) => {
+  let body = "";
+  req.on("data", (c: Buffer) => (body += c.toString()));
+  req.on("end", () => {
+    received.push(body);
+    res.writeHead(200).end("ok");
+  });
+});
+await new Promise<void>((r) => alertSink.listen(PORT_ALERT_SINK, "127.0.0.1", r));
+
+const alertSupervisor = run(binary, [], {
+  SUPERVISOR_ADDR: `127.0.0.1:${PORT_ALERT_DASH}`,
+  WORKSPACE_DIR: `${SANDBOX}/workspace`,
+  MEMORY_DIR: `${SANDBOX}/memory`,
+  LOGS_DIR: GUARD_LOGDIR,
+  STOP_FILE: `${SANDBOX}/STOP_ALERTS`,
+  ACTIONS_FILE: `${GUARD_LOGDIR}/actions.jsonl`,
+  JOURNAL_FILE: `${SANDBOX}/memory/journal.md`,
+  STATE_FILE: `${SANDBOX}/memory/state-guard.json`,
+  TEMPLATE_DIR: `${ROOT}web/templates`,
+  SUPERVISOR_PORT: String(PORT_ALERT_DASH),
+  MAX_BUDGET_USD: "0.0001",
+  COST_ALERT_USD: "0.00001",
+  IDLE_ALERT_MINUTES: "0",
+  ALERT_WEBHOOK_URL: `http://127.0.0.1:${PORT_ALERT_SINK}/hook`,
+  ALERT_COOLDOWN: "0s",
+});
+// The watchdog ticks every 20s; give it two ticks so it sees the stale log.
+await sleep(26000);
+alertSupervisor.kill("SIGTERM");
+await new Promise<void>((r) => alertSink.close(() => r()));
+
+check("alert webhook received something", received.length > 0, `${received.length} payloads`);
+const payloads = received.join("\n");
+check("alert is valid JSON", payloads.trim().startsWith("{"));
+check("alert has a level", payloads.includes('"level"'));
+check("alert has content for Discord", payloads.includes('"content"'));
+check("alert names the condition", /idle|cost|stuck|halt/i.test(payloads));
+
+// Separate port and a separate log dir: the phase 1 fake model is still
   // running, and its actions.jsonl is already asserted on above.
   const BROWSER_LOGDIR = `${SANDBOX}/logs-browser`;
   spawn("mkdir", ["-p", `${BROWSER_LOGDIR}/screenshots`]);

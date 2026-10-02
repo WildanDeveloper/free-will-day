@@ -97,20 +97,19 @@ export class ModelClient {
       content: typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content,
     }));
 
+    // tools is always sent, as an empty array when there are none. Omitting the
+    // field entirely is ambiguous: some gateways treat a missing field as "use
+    // whatever you like" and answer with tool calls the caller cannot resolve.
     const body = {
       model: this.cfg.modelId,
       max_tokens: req.maxTokens ?? 4096,
       system: req.system,
       messages,
-      ...(req.tools.length
-        ? {
-            tools: req.tools.map((t) => ({
-              name: t.name,
-              description: t.description,
-              input_schema: t.parameters,
-            })),
-          }
-        : {}),
+      tools: req.tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.parameters,
+      })),
     };
 
     const res = await fetch(this.url("/v1/messages"), {
@@ -193,18 +192,16 @@ export class ModelClient {
     const body = {
       model: this.cfg.modelId,
       messages,
-      ...(req.tools.length
-        ? {
-            tools: req.tools.map((t) => ({
-              type: "function",
-              function: {
-                name: t.name,
-                description: t.description,
-                parameters: t.parameters,
-              },
-            })),
-          }
-        : {}),
+      // Always present, empty when there are no tools. See the Anthropic path
+      // for why the field is never omitted.
+      tools: req.tools.map((t) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        },
+      })),
     };
 
     const res = await fetch(this.url("/v1/chat/completions"), {

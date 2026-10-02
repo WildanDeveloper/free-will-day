@@ -12,6 +12,8 @@ import { loadConfig, parseDuration, type Config } from "../config/config.ts";
 import { BrowserSession } from "../browser/session.ts";
 import { ModelClient, type ContentBlock, type Message } from "../llm/client.ts";
 import { ActionLog, readRecent, type ActionRecord } from "../logger/actions.ts";
+import { compactWindow, journalWindow } from "./compact.ts";
+import { detectStuckLoop, stuckNudge } from "./loopguard.ts";
 import { dispatch, specsFor, type ToolContext } from "./tools.ts";
 
 type State = {
@@ -19,6 +21,8 @@ type State = {
   spentUsd: number;
   startedAt: number;
   actionCount: number;
+  /** Actions since the last real compaction. */
+  sinceCompaction: number;
 };
 
 const SYSTEM_PROMPT = `You are an autonomous agent running unattended.
@@ -48,9 +52,10 @@ function loadState(file: string): State {
       spentUsd: parsed.spentUsd ?? 0,
       startedAt: parsed.startedAt ?? Date.now(),
       actionCount: parsed.actionCount ?? 0,
+      sinceCompaction: parsed.sinceCompaction ?? 0,
     };
   } catch {
-    return { seq: 0, spentUsd: 0, startedAt: Date.now(), actionCount: 0 };
+    return { seq: 0, spentUsd: 0, startedAt: Date.now(), actionCount: 0, sinceCompaction: 0 };
   }
 }
 
@@ -58,18 +63,15 @@ function saveState(file: string, state: State): void {
   writeFileSync(file, JSON.stringify(state, null, 2), "utf8");
 }
 
-/** Journal tail plus goals, so the prompt survives history compaction. */
+/**
+ * Goals plus the journal tail. This, not the conversation, is what carries
+ * intent across iterations.
+ */
 function memoryContext(cfg: Config): string {
   const goals = existsSync(join(cfg.memoryDir, "goals.md"))
     ? readFileSync(join(cfg.memoryDir, "goals.md"), "utf8")
     : "(no goals.md)";
-  let journal = "(empty journal)";
-  try {
-    const full = readFileSync(join(cfg.memoryDir, "journal.md"), "utf8");
-    journal = full.slice(-6000);
-  } catch {
-    // First iteration: journal does not exist yet.
-  }
+  const journal = journalWindow(cfg.memoryDir);
   return `## goals.md\n${goals}\n\n## journal.md (tail)\n${journal}`;
 }
 
@@ -196,8 +198,54 @@ export async function run(): Promise<number> {
       return halt("model requested credentials or sandbox escape");
     }
 
+    // Real compaction: summarize the window into the journal, then drop it.
+    // Runs before the prompt is rebuilt, so the new prompt starts clean.
+    let compactionNote = "";
+    if (state.sinceCompaction >= cfg.summarizeEvery) {
+      const compaction = await compactWindow({
+        client,
+        memoryDir: cfg.memoryDir,
+        records: readRecent(log.path(), Math.max(cfg.contextActions, state.sinceCompaction)),
+        actionCount: state.sinceCompaction,
+      });
+
+      if (compaction.compacted) {
+        state.sinceCompaction = 0;
+        state.spentUsd += compaction.costUsd ?? 0;
+        log.write({
+          ts: Date.now(),
+          seq: ++state.seq,
+          type: "summary",
+          output: compaction.summary,
+          costUsd: compaction.costUsd,
+        });
+        compactionNote =
+          `Your recent history was summarised into the journal. ` +
+          `That summary is your memory now.`;
+      } else if (compaction.error) {
+        log.write({
+          ts: Date.now(),
+          seq: ++state.seq,
+          type: "error",
+          output: `compaction failed: ${compaction.error}`,
+        });
+      }
+    }
+
+    const recent = readRecent(log.path(), cfg.contextActions);
+    const verdict = detectStuckLoop(recent, cfg.loopDetectionThreshold);
+    if (verdict.stuck) {
+      log.write({
+        ts: Date.now(),
+        seq: ++state.seq,
+        type: "note",
+        output: `stuck loop: ${verdict.reason}`,
+      });
+    }
+
     if (!result.toolCalls.length) {
       state.actionCount += 1;
+      state.sinceCompaction += 1;
       log.write({
         ts: Date.now(),
         seq: ++state.seq,
@@ -212,9 +260,12 @@ export async function run(): Promise<number> {
       messages = [
         {
           role: "user",
-          content:
+          content: [
             `${memoryContext(cfg)}\n\nYou responded with text but took no action. ` +
-            `Use a tool to make progress, or write a journal entry explaining why you stopped.`,
+              `Use a tool to make progress, or write a journal entry explaining why you stopped.`,
+            ...(compactionNote ? [`\n\n${compactionNote}`] : []),
+            ...(verdict.stuck ? [`\n\n${stuckNudge(verdict)}`] : []),
+          ].join(""),
         },
       ];
       saveState(cfg.stateFile, state);
@@ -231,6 +282,7 @@ export async function run(): Promise<number> {
 
       const outcome = await dispatch(toolCtx, call.name, call.input);
       state.actionCount += 1;
+      state.sinceCompaction += 1;
 
       log.write({
         ts: Date.now(),
@@ -265,14 +317,7 @@ export async function run(): Promise<number> {
                 },
               ]
             : []),
-          ...(state.actionCount % cfg.summarizeEvery === 0
-            ? [
-                {
-                  type: "text" as const,
-                  text: "History is about to be compacted. Summarize your progress and next plan into the journal.",
-                },
-              ]
-            : []),
+          ...(verdict.stuck ? [{ type: "text" as const, text: stuckNudge(verdict) }] : []),
           "Take the next action.",
         ],
       },

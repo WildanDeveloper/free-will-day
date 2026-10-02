@@ -11,6 +11,8 @@
     "agent": "node cmd/agent/main.ts",
     "supervisor": "go run ./cmd/supervisor",
     "build:supervisor": "go build -o bin/supervisor ./cmd/supervisor",
+    "test": "npm run test:unit && npm run test:browser && npm run smoke",
+    "test:unit": "node scripts/compaction-test.ts",
     "test:browser": "node scripts/browser-test.ts",
     "smoke": "node scripts/smoke.ts"
   },

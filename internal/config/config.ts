@@ -22,8 +22,13 @@ export type Config = {
   sleepMs: number;
   /** How many recent actions are included in the prompt. */
   contextActions: number;
-  /** Compact history into the journal every N actions. */
+  /**
+   * Actions between real compactions. At this point the recent-action window
+   * is summarised into the journal by the model and then dropped.
+   */
   summarizeEvery: number;
+  /** Identical consecutive tool calls before the agent is nudged. */
+  loopDetectionThreshold: number;
   /** Mandatory journal entry every N minutes. */
   journalEveryMinutes: number;
   /** Truncate tool output to this many characters before it enters context. */
@@ -93,6 +98,7 @@ export function loadConfig(): Config {
     sleepMs: num("SLEEP_MS", 2000),
     contextActions: num("CONTEXT_ACTIONS", 20),
     summarizeEvery: num("SUMMARIZE_EVERY", 30),
+    loopDetectionThreshold: num("LOOP_DETECTION_THRESHOLD", 3),
     journalEveryMinutes: num("JOURNAL_EVERY_MINUTES", 60),
     maxToolOutput: num("MAX_TOOL_OUTPUT", 4000),
 

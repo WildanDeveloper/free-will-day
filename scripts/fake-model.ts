@@ -60,6 +60,23 @@ function scriptedResponse(step: number): Record<string, unknown> {
     ],
   ];
 
+  // FAKE_REPEAT_TOOL=1 makes every turn the same identical call, which is what
+  // the stuck-loop detector is supposed to catch.
+  if (process.env.FAKE_REPEAT_TOOL === "1") {
+    return {
+      content: [
+        {
+          type: "tool_use",
+          id: `r${step}`,
+          name: "shell",
+          input: { command: "echo stuck-loop" },
+        },
+      ],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 400, output_tokens: 40 },
+    };
+  }
+
   const turn = script[step % script.length] as Record<string, unknown>[];
 
   return {
@@ -136,6 +153,13 @@ const server = createServer((req, res) => {
   let body = "";
   req.on("data", (chunk: Buffer) => (body += chunk.toString()));
   req.on("end", () => {
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse(body || "{}");
+    } catch {
+      parsed = {};
+    }
+
     // Basic auth check: the agent must send credentials when they are set.
     const auth = req.headers.authorization ?? "";
     if (process.env.FAKE_REQUIRE_BASIC === "1" && !auth.startsWith("Basic ")) {
@@ -145,10 +169,33 @@ const server = createServer((req, res) => {
     }
 
     state.calls += 1;
-    const payload =
-      process.env.FAKE_BROWSER_SCRIPT === "1"
-        ? browserScript(state.calls)
-        : scriptedResponse(state.calls);
+
+    // Compaction calls the model with no tools and asks for prose. A real model
+    // summarises here; the fake must do the same, or compaction can never be
+    // exercised. Detection is on the tool list being absent, which is the actual
+    // signal: an empty tools array means this cannot be a normal turn.
+    const isCompaction = Array.isArray(parsed?.tools) && parsed.tools.length === 0;
+
+    let payload: Record<string, unknown>;
+    if (isCompaction) {
+      payload = {
+        content: [
+          {
+            type: "text",
+            text:
+              `Auto summary at call ${state.calls}: repeatedly ran the same shell ` +
+              `command and got the same output. Nothing changed state. Next: try a ` +
+              `different tool or write the blocker down.`,
+          },
+        ],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 700, output_tokens: 90 },
+      };
+    } else if (process.env.FAKE_BROWSER_SCRIPT === "1") {
+      payload = browserScript(state.calls);
+    } else {
+      payload = scriptedResponse(state.calls);
+    }
 
     console.error(`[fake-model] call ${state.calls} -> ${JSON.stringify(payload.content)}`);
 
