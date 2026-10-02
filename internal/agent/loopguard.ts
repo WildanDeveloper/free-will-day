@@ -31,58 +31,100 @@ function fingerprint(input: unknown): string {
 }
 
 /**
- * Look for the same tool called with the same input repeatedly in the window.
- * `threshold` identical calls in a row is the trigger.
+ * Look for repetition in the recent window.
+ *
+ * Two shapes are caught, because an agent gets stuck in both:
+ *
+ * 1. the same call repeated outright, and
+ * 2. a short cycle repeated, e.g. "ls, cat goals, say nothing" over and over.
+ *    A strict consecutive test misses this entirely, which is exactly how a real
+ *    2 hour run spent its first minutes re-reading its own goals.
+ *
+ * Also treats "spoke without acting" as an action worth counting: an agent that
+ * keeps promising to start and never starts is the most common failure here.
  */
 export function detectStuckLoop(
   records: ActionRecord[],
   threshold: number,
 ): LoopVerdict {
   const actions = records.filter((r) => r.type === "action" && r.tool);
-  if (actions.length < threshold) {
-    return { stuck: false, reason: "" };
+  if (actions.length < threshold) return { stuck: false, reason: "" };
+
+  const window = actions.slice(-Math.max(threshold * 6, 24));
+  const keyOf = (rec: ActionRecord) =>
+    `${rec.tool}:${fingerprint(rec.input)}`;
+
+  // 1. Identical calls, consecutive.
+  let run = 1;
+  for (let i = window.length - 1; i > 0; i -= 1) {
+    if (keyOf(window[i]) === keyOf(window[i - 1])) run += 1;
+    else break;
+  }
+  if (run >= threshold) {
+    const last = window[window.length - 1];
+    return {
+      stuck: true,
+      tool: last.tool,
+      repeats: run,
+      reason: `${last.tool} called ${run} times with identical input`,
+    };
   }
 
-  const window = actions.slice(-Math.max(threshold * 2, 20));
-  const counts = new Map<string, { tool: string; count: number }>();
+  // 2. A repeated cycle of 2 to 4 distinct steps.
+  for (let size = 2; size <= 4; size += 1) {
+    const tail = window.slice(-size * 3);
+    if (tail.length < size * 2) continue;
 
-  for (const rec of window) {
-    const key = `${rec.tool}:${fingerprint(rec.input)}`;
-    const entry = counts.get(key);
-    if (entry) {
-      entry.count += 1;
-    } else {
-      counts.set(key, { tool: rec.tool as string, count: 1 });
+    const cycle = tail.slice(0, size).map(keyOf);
+    let repeats = 1;
+    for (let i = size; i + size <= tail.length; i += size) {
+      const candidate = tail.slice(i, i + size).map(keyOf);
+      if (candidate.every((k, j) => k === cycle[j])) repeats += 1;
+      else break;
+    }
+    if (repeats >= 3) {
+      const steps = tail
+        .slice(0, size)
+        .map((r) => r.tool)
+        .join(" -> ");
+      return {
+        stuck: true,
+        tool: tail[0].tool,
+        repeats: repeats * size,
+        reason: `repeating a ${size}-step cycle (${steps}) ${repeats} times`,
+      };
     }
   }
 
-  let worst: { tool: string; count: number } | null = null;
-  for (const entry of counts.values()) {
-    if (!worst || entry.count > worst.count) worst = entry;
+  return { stuck: false, reason: "" };
+}
+
+/**
+ * A separate signal from the tool loop: an agent that keeps answering in prose
+ * and never calling a tool. Counted over the whole window rather than
+ * consecutively, since real stuck behaviour interleaves tools with talk.
+ */
+export function detectIdleTalking(
+  records: ActionRecord[],
+  window: number,
+  ratio = 0.25,
+): LoopVerdict {
+  const actions = records.filter((r) => r.type === "action" && r.tool);
+  if (actions.length < 5) return { stuck: false, reason: "" };
+
+  const recent = actions.slice(-window);
+  const silent = recent.filter((r) => r.tool === "(no tool call)").length;
+  // A third of turns producing no action is already a real problem: the agent
+  // is narrating progress instead of making it.
+  if (recent.length >= 5 && silent / recent.length >= ratio) {
+    return {
+      stuck: true,
+      tool: "(no tool call)",
+      repeats: silent,
+      reason: `${silent} of the last ${recent.length} actions produced text but no action`,
+    };
   }
-
-  // Only consecutive repetition counts. Interleaved distinct actions mean the
-  // agent is busy, not stuck.
-  if (!worst || worst.count < threshold) {
-    return { stuck: false, reason: "" };
-  }
-
-  const lastKey = `${window[window.length - 1].tool}:${fingerprint(window[window.length - 1].input)}`;
-  const tail = window.slice(-threshold);
-  const consecutive = tail.every(
-    (rec) => `${rec.tool}:${fingerprint(rec.input)}` === lastKey,
-  );
-
-  if (!consecutive) {
-    return { stuck: false, reason: "" };
-  }
-
-  return {
-    stuck: true,
-    tool: worst.tool,
-    repeats: worst.count,
-    reason: `${worst.tool} called ${worst.count} times with identical input`,
-  };
+  return { stuck: false, reason: "" };
 }
 
 /** The nudge text injected into the prompt when a loop is detected. */

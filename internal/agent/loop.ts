@@ -14,7 +14,7 @@ import { BrowserSession } from "../browser/session.ts";
 import { ModelClient, type ContentBlock, type Message } from "../llm/client.ts";
 import { ActionLog, readRecent, type ActionRecord } from "../logger/actions.ts";
 import { compactWindow, journalWindow } from "./compact.ts";
-import { detectStuckLoop, stuckNudge } from "./loopguard.ts";
+import { detectIdleTalking, detectStuckLoop, stuckNudge } from "./loopguard.ts";
 import { dispatch, specsFor, type ToolContext } from "./tools.ts";
 
 type State = {
@@ -185,6 +185,8 @@ export async function run(): Promise<number> {
   ];
 
   let lastJournalAt = Date.now();
+  // Consecutive text-only turns, used to escalate the prompt.
+  let silentCount = 0;
 
   for (;;) {
     if (existsSync(cfg.stopFile)) return halt("STOP file present");
@@ -268,7 +270,10 @@ export async function run(): Promise<number> {
     }
 
     const recent = readRecent(log.path(), cfg.contextActions);
-    const verdict = detectStuckLoop(recent, cfg.loopDetectionThreshold);
+    const toolLoop = detectStuckLoop(recent, cfg.loopDetectionThreshold);
+    const idleTalking = detectIdleTalking(recent, cfg.contextActions);
+    // Either shape means the same thing: nothing is progressing.
+    const verdict = toolLoop.stuck ? toolLoop : idleTalking;
     if (verdict.stuck) {
       log.write({
         ts: Date.now(),
@@ -279,25 +284,43 @@ export async function run(): Promise<number> {
     }
 
     if (!result.toolCalls.length) {
-      state.actionCount += 1;
-      state.sinceCompaction += 1;
+      // Talking is not working. It is recorded so the dashboard shows it, but it
+      // does not advance the action counter: a model that narrates for twenty
+      // iterations should not trigger compaction as though it had built twenty
+      // things.
+      silentCount += 1;
       log.write({
         ts: Date.now(),
         seq: ++state.seq,
         type: "action",
         thought: result.text.slice(0, 1000),
         tool: "(no tool call)",
-        ok: true,
+        ok: false,
+        output: "no tool call: text only",
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         costUsd: result.costUsd,
       });
+
+      // Escalate with every consecutive silent turn. A generic "take an action"
+      // was not enough: an agent can repeat that promise indefinitely.
+      const escalation = silentCount >= 4
+        ? `You have now answered with text and no action ${silentCount} times in a row. ` +
+          `Saying you will start is not starting.\n\n` +
+          `Do exactly one of these, now, in this turn:\n` +
+          `- Call write_journal and record the blocker.\n` +
+          `- Call shell and run one command that changes something on disk.\n` +
+          `- Call write_file and create or edit a real file.\n\n` +
+          `If you genuinely want to stop, call write_journal saying so and why. ` +
+          `That is a legitimate outcome. Repeating yourself is not.`
+        : `You responded with text but took no action. ` +
+          `Use a tool now. Do not describe what you are about to do; do it.`;
+
       messages = [
         {
           role: "user",
           content: [
-            `${memoryContext(cfg)}\n\nYou responded with text but took no action. ` +
-              `Use a tool to make progress, or write a journal entry explaining why you stopped.`,
+            `${memoryContext(cfg)}\n\n${escalation}`,
             ...(compactionNote ? [`\n\n${compactionNote}`] : []),
             ...(verdict.stuck ? [`\n\n${stuckNudge(verdict)}`] : []),
           ].join(""),
@@ -307,6 +330,9 @@ export async function run(): Promise<number> {
       await sleep(cfg.sleepMs);
       continue;
     }
+
+    // A real tool call resets the silence counter.
+    silentCount = 0;
 
     const assistantBlocks: ContentBlock[] = [];
     if (result.text.trim()) assistantBlocks.push({ type: "text", text: result.text });

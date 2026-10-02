@@ -18,11 +18,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { compactWindow, journalTail, rotateJournal } from "../internal/agent/compact.ts";
-import { detectStuckLoop, stuckNudge } from "../internal/agent/loopguard.ts";
+import {
+  detectIdleTalking,
+  detectStuckLoop,
+  stuckNudge,
+} from "../internal/agent/loopguard.ts";
 import { readRecent } from "../internal/logger/actions.ts";
 import type { ActionRecord } from "../internal/logger/actions.ts";
 
 const failures: string[] = [];
+
+const ROOT = new URL("..", import.meta.url).pathname;
 
 function check(label: string, condition: boolean, detail = ""): void {
   console.log(`  [${condition ? "PASS" : "FAIL"}] ${label}${detail ? ` — ${detail}` : ""}`);
@@ -125,19 +131,20 @@ const varied = detectStuckLoop(
 );
 check("varied work is not flagged", varied.stuck === false);
 
-console.log("\n7. interleaved actions are not a stuck loop");
+console.log("\n7. one-off interleaving is not a stuck loop");
+// Deliberately short: a couple of alternations is normal work. A *repeated*
+// cycle is stuck, and section 13 covers that separately. The earlier version of
+// this assertion used six alternating actions and would now be flagged, which
+// was the wrong expectation.
 const interleaved = detectStuckLoop(
   [
-    record({ tool: "shell" }),
-    record({ tool: "list_dir" }),
-    record({ tool: "shell" }),
-    record({ tool: "list_dir" }),
-    record({ tool: "shell" }),
-    record({ tool: "list_dir" }),
+    record({ tool: "shell", input: { command: "a" } }),
+    record({ tool: "list_dir", input: { path: "." } }),
+    record({ tool: "shell", input: { command: "b" } }),
   ],
   3,
 );
-check("interleaving is not flagged", interleaved.stuck === false);
+check("brief interleaving is not flagged", interleaved.stuck === false);
 
 console.log("\n8. below threshold is not flagged");
 check(
@@ -226,6 +233,78 @@ const entry = "## 2099-01-01T00:00:00Z — entry\n" + "y".repeat(580) + "\n";
   writeFileSync(smallPath, "tiny journal", "utf8");
   rotateJournal(dir);
   check("small journal left untouched", readFileSync(smallPath, "utf8") === "tiny journal");
+}
+
+console.log("\n13. repeated cycles are caught");
+// Regression from a real 2 hour run: the agent alternated
+// "ls, cat goals, say nothing" and a consecutive-only test never fired.
+{
+  const cycle: ActionRecord[] = [];
+  for (let i = 0; i < 6; i += 1) {
+    cycle.push(record({ tool: "shell", input: { command: "ls" } }));
+    cycle.push(record({ tool: "read_file", input: { path: "goals.md" } }));
+    cycle.push({ ...record({ tool: "(no tool call)" }), ok: false });
+  }
+  const verdict = detectStuckLoop(cycle, 3);
+  check("interleaved cycle detected", verdict.stuck, verdict.reason);
+  check("cycle is described", /cycle/.test(verdict.reason), verdict.reason.slice(0, 60));
+}
+
+console.log("\n14. genuine varied work is not flagged");
+{
+  const varied: ActionRecord[] = [];
+  for (let i = 0; i < 8; i += 1) {
+    varied.push(record({ tool: "shell", input: { command: `step-${i}` } }));
+    varied.push(record({ tool: "write_file", input: { path: `f${i}.txt` } }));
+  }
+  check("varied sequence is not stuck", detectStuckLoop(varied, 3).stuck === false);
+}
+
+console.log("\n15. talking without acting is detected");
+// Regression: 16 of 50 actions in the real run were text-only, interleaved
+// with real tool calls, so the tool loop never triggered.
+{
+  const talky: ActionRecord[] = [];
+  for (let i = 0; i < 4; i += 1) {
+    talky.push(record({ tool: "shell", input: { command: `ls-${i}` } }));
+    talky.push({ ...record({ tool: "(no tool call)" }), ok: false });
+  }
+  const verdict = detectIdleTalking(talky, 20);
+  check("text-only turns flagged", verdict.stuck, verdict.reason);
+  check("ratio is reported", /of the last/.test(verdict.reason), verdict.reason);
+}
+
+console.log("\n15b. the real 2 hour log is recognised as stuck");
+// Regression fixture: an actual run that spent its first minutes saying
+// "I'll start by orienting myself" instead of working.
+{
+  const realLog = join(ROOT, "soak", "soak2h", "logs", "actions.jsonl");
+  if (!existsSync(realLog)) {
+    console.log("  [SKIP] soak log not present");
+  } else {
+    const parsed = readFileSync(realLog, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((l) => {
+        try {
+          return [JSON.parse(l)];
+        } catch {
+          return [];
+        }
+      }) as ActionRecord[];
+    const verdict = detectIdleTalking(parsed, 30);
+    check("real log flagged as stuck", verdict.stuck, verdict.reason.slice(0, 90));
+  }
+}
+
+console.log("\n16. a working agent is not flagged as talky");
+{
+  const working: ActionRecord[] = [];
+  for (let i = 0; i < 10; i += 1) {
+    working.push(record({ tool: "shell", input: { command: `cmd-${i}` } }));
+    working.push(record({ tool: "write_file", input: { path: `f${i}` } }));
+  }
+  check("working agent is fine", detectIdleTalking(working, 20).stuck === false);
 }
 
 console.log(`\n${failures.length ? "FAILED" : "PASSED"}: ${failures.length} failure(s)`);
