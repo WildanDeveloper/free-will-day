@@ -39,12 +39,19 @@ stdlib only. No `npm install` is required for a basic run: the agent uses
 ```bash
 cp .env.example .env      # set MODEL_API_KEY
 npm run smoke             # fake model, full loop, assertions, no cost
+npm run test:browser      # drives real headless Chromium, needs playwright
 ```
 
-`npm run smoke` starts a fake model on port 8099, runs the agent loop for eight
-seconds, builds and starts the supervisor, then asserts the log, journal,
-workspace output, dashboard auth, dashboard rendering, the STOP endpoint, and
-that the agent halts cleanly on the STOP file.
+`npm run smoke` runs 24 assertions in eight phases: a fake model drives the
+agent loop, the supervisor is built and started, then the log, journal,
+workspace output, dashboard auth, dashboard rendering, the STOP endpoint, and a
+clean halt on the STOP file are all checked. Phase 8 additionally drives the
+real browser through the loop and confirms screenshots reach the dashboard.
+
+`npm run test:browser` exercises the browser tool directly against a local page:
+navigate, read, type, click, relaunch after a dead page, and screenshot capture.
+
+Neither test needs an API key, network access, or any cost.
 
 ## Running for real
 
@@ -82,7 +89,24 @@ against the workspace or memory root and are rejected if they escape. Shell
 commands get a scrubbed environment: `HOME` points at the workspace, so
 `~/.ssh` and friends do not exist.
 
-Browser control is not wired yet. `ENABLE_BROWSER` is reserved for it.
+Set `ENABLE_BROWSER=1` to add a sixth tool, `browser`, backed by headless
+Chromium via Playwright. It is lazy-loaded, so a run with the browser off needs
+no dependency at all.
+
+```
+npm install
+npx playwright install --with-deps chromium
+```
+
+Actions: `open` (needs `url`, must be http or https), `read` (visible text),
+`click` and `type` and `press` (need `selector`), `back`, `screenshot`,
+`close`. Every interactive action saves a PNG to `logs/screenshots/`, and
+`SCREENSHOT_EVERY_MINUTES` (default 5) captures on a timer regardless of what
+the model is doing. A dead page is detected and relaunched rather than left
+broken, which matters over a 24 hour run.
+
+Browser tests are skipped automatically when the Playwright browser is not
+installed, so the smoke test still passes on a machine without it.
 
 ## Stop conditions
 

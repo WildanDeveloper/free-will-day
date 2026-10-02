@@ -69,7 +69,65 @@ function scriptedResponse(step: number): Record<string, unknown> {
   };
 }
 
+/** Script used when FAKE_BROWSER_SCRIPT=1: drives the browser tool. */
+function browserScript(step: number): Record<string, unknown> {
+  const turns: Record<string, unknown>[] = [
+    {
+      type: "tool_use",
+      id: `b${step}`,
+      name: "browser",
+      input: { action: "open", url: process.env.FAKE_PAGE_URL ?? "http://127.0.0.1:8123/" },
+    },
+    {
+      type: "tool_use",
+      id: `b${step}`,
+      name: "browser",
+      input: { action: "read" },
+    },
+    {
+      type: "tool_use",
+      id: `b${step}`,
+      name: "browser",
+      input: { action: "type", selector: "#name", text: "freewillday" },
+    },
+    {
+      type: "tool_use",
+      id: `b${step}`,
+      name: "browser",
+      input: { action: "click", selector: "#go" },
+    },
+    {
+      type: "tool_use",
+      id: `b${step}`,
+      name: "browser",
+      input: { action: "read" },
+    },
+    {
+      type: "tool_use",
+      id: `b${step}`,
+      name: "write_journal",
+      input: { entry: `Browser turn ${step}. Page read, form submitted.` },
+    },
+  ];
+
+  // step - 1 so the first turn is `open`, not `read`.
+  const turn = [turns[(step - 1) % turns.length]];
+  return {
+    content: turn,
+    stop_reason: "tool_use",
+    usage: { input_tokens: 900 + step * 5, output_tokens: 120 + step },
+  };
+}
+
 const server = createServer((req, res) => {
+  // Readiness probe. Deliberately does not advance the script: a probe must
+  // not consume a turn the agent is meant to see.
+  if (req.method === "GET") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, calls: state.calls }));
+    return;
+  }
+
   if (req.method !== "POST") {
     res.writeHead(405).end();
     return;
@@ -87,7 +145,10 @@ const server = createServer((req, res) => {
     }
 
     state.calls += 1;
-    const payload = scriptedResponse(state.calls);
+    const payload =
+      process.env.FAKE_BROWSER_SCRIPT === "1"
+        ? browserScript(state.calls)
+        : scriptedResponse(state.calls);
 
     console.error(`[fake-model] call ${state.calls} -> ${JSON.stringify(payload.content)}`);
 

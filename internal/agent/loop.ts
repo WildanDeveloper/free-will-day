@@ -9,9 +9,10 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { loadConfig, parseDuration, type Config } from "../config/config.ts";
+import { BrowserSession } from "../browser/session.ts";
 import { ModelClient, type ContentBlock, type Message } from "../llm/client.ts";
 import { ActionLog, readRecent, type ActionRecord } from "../logger/actions.ts";
-import { dispatch, TOOL_SPECS, type ToolContext } from "./tools.ts";
+import { dispatch, specsFor, type ToolContext } from "./tools.ts";
 
 type State = {
   seq: number;
@@ -97,18 +98,38 @@ export async function run(): Promise<number> {
   const log = new ActionLog(join(cfg.logsDir, "actions.jsonl"));
   const state = loadState(cfg.stateFile);
   const client = new ModelClient(cfg);
+
+  const browser = cfg.enableBrowser
+    ? new BrowserSession({
+        screenshotDir: join(cfg.logsDir, "screenshots"),
+        maxOutput: cfg.maxToolOutput,
+        navTimeoutMs: 30_000,
+      })
+    : undefined;
+
   const toolCtx: ToolContext = {
     workspaceDir: cfg.workspaceDir,
     memoryDir: cfg.memoryDir,
     logsDir: cfg.logsDir,
     maxOutput: cfg.maxToolOutput,
     shellTimeoutMs: 120_000,
+    ...(browser ? { browser } : {}),
   };
+
+  const toolSpecs = specsFor(cfg.enableBrowser);
+
+  // Periodic capture so the dashboard shows something even while the model is
+  // busy thinking. Only runs once the browser exists, to avoid launching
+  // Chromium just to take a picture of nothing.
+  const captureTimer = setInterval(() => {
+    void browser?.captureQuietly();
+  }, cfg.screenshotEveryMinutes * 60_000);
 
   const deadline = state.startedAt + parseDuration(cfg.runDuration);
   const startedAt = Date.now();
 
   const halt = (reason: string): number => {
+    clearInterval(captureTimer);
     log.write({
       ts: Date.now(),
       seq: ++state.seq,
@@ -116,6 +137,7 @@ export async function run(): Promise<number> {
       haltReason: reason,
     });
     saveState(cfg.stateFile, state);
+    void browser?.shutdown();
     process.stderr.write(`[agent] halted: ${reason}\n`);
     return 0;
   };
@@ -147,7 +169,7 @@ export async function run(): Promise<number> {
       result = await client.chat({
         system: SYSTEM_PROMPT,
         messages,
-        tools: TOOL_SPECS,
+        tools: toolSpecs,
         maxTokens: 4096,
       });
     } catch (err) {

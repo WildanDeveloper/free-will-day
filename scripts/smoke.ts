@@ -7,13 +7,18 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const SANDBOX = `${ROOT}.smoke`;
 const PORT_AGENT_MODEL = 8099;
+const PORT_BROWSER_MODEL = 8097;
 const PORT_DASH = 8098;
+const PORT_SHOT_DASH = 8096;
+const PORT_PAGE = 8123;
 
 const failures: string[] = [];
 
@@ -69,7 +74,10 @@ await sleep(150);
 
 console.log("\n0. ports");
 await assertPortFree(PORT_AGENT_MODEL);
+await assertPortFree(PORT_BROWSER_MODEL);
 await assertPortFree(PORT_DASH);
+await assertPortFree(PORT_SHOT_DASH);
+await assertPortFree(PORT_PAGE);
 
 console.log("\n1. fake model");
 const fake = run("node", ["scripts/fake-model.ts"], {
@@ -233,6 +241,130 @@ await sleep(2500);
 const exitedCleanly = agent2.exitCode === 0 || agent2.exitCode === null;
 check("agent exits on STOP without error", exitedCleanly, `exit ${agent2.exitCode}`);
 agent2.kill("SIGKILL");
+
+// Phase 8: the browser tool inside the real loop. Needs the Playwright browser,
+// so it is skipped rather than failed when that is not installed.
+console.log("\n8. browser tool in the loop");
+const playwrightInstalled = existsSync(
+  join(process.env.HOME ?? "/root", ".cache/ms-playwright"),
+);
+if (!playwrightInstalled) {
+  console.log("  [SKIP] playwright browser not installed (npx playwright install chromium)");
+} else {
+  const pageServer = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(
+      `<!DOCTYPE html><html><head><title>Smoke Page</title></head><body><main>` +
+        `<h1>Smoke Page</h1><p id="g">unwritten</p>` +
+        `<input id="name" /><button id="go" onclick="document.getElementById('g').textContent=` +
+        `'Hello, '+(document.getElementById('name').value||'nobody')">Go</button>` +
+        `</main></body></html>`,
+    );
+  });
+  await new Promise<void>((r) => pageServer.listen(PORT_PAGE, "127.0.0.1", r));
+
+  // Separate port and a separate log dir: the phase 1 fake model is still
+  // running, and its actions.jsonl is already asserted on above.
+  const BROWSER_LOGDIR = `${SANDBOX}/logs-browser`;
+  spawn("mkdir", ["-p", `${BROWSER_LOGDIR}/screenshots`]);
+  await sleep(100);
+
+  const fakeBrowser = run("node", ["scripts/fake-model.ts"], {
+    FAKE_MODEL_PORT: String(PORT_BROWSER_MODEL),
+    FAKE_BROWSER_SCRIPT: "1",
+    FAKE_PAGE_URL: `http://127.0.0.1:${PORT_PAGE}/`,
+  });
+
+  // Wait for readiness rather than sleeping a fixed amount: a cold Node start
+  // used to lose the race, and the agent's first turn then ran without `open`.
+  let modelReady = false;
+  for (let attempt = 0; attempt < 40 && !modelReady; attempt += 1) {
+    await sleep(250);
+    try {
+      // GET, not POST: a POST would advance the fake model's script and the
+      // agent would miss its first turn.
+      const probe = await fetch(`http://127.0.0.1:${PORT_BROWSER_MODEL}/`);
+      modelReady = probe.ok;
+    } catch {
+      // Not listening yet.
+    }
+  }
+  check("browser fake model reachable", modelReady);
+
+  // Same for the page server, so `open` cannot lose the race either.
+  let pageReady = false;
+  for (let attempt = 0; attempt < 20 && !pageReady; attempt += 1) {
+    await sleep(100);
+    try {
+      const probe = await fetch(`http://127.0.0.1:${PORT_PAGE}/`);
+      pageReady = probe.ok;
+    } catch {
+      // Not listening yet.
+    }
+  }
+  check("test page reachable", pageReady);
+
+  const browserAgent = run("node", ["cmd/agent/main.ts"], {
+    MODEL_BASE_URL: `http://127.0.0.1:${PORT_BROWSER_MODEL}`,
+    MODEL_API_KEY: "fake-key",
+    MODEL_STYLE: "anthropic",
+    MODEL_ID: "fake-model",
+    WORKSPACE_DIR: `${SANDBOX}/workspace`,
+    MEMORY_DIR: `${SANDBOX}/memory`,
+    LOGS_DIR: BROWSER_LOGDIR,
+    STOP_FILE: `${SANDBOX}/STOP_BROWSER`,
+    STATE_FILE: `${SANDBOX}/memory/state-browser.json`,
+    RUN_DURATION: "10m",
+    SLEEP_MS: "150",
+    ENABLE_BROWSER: "1",
+  });
+  await sleep(9000);
+  browserAgent.kill("SIGTERM");
+  fakeBrowser.kill("SIGTERM");
+  await new Promise<void>((r) => pageServer.close(() => r()));
+
+  const shotsDir = `${BROWSER_LOGDIR}/screenshots`;
+  const shots = existsSync(shotsDir) ? readdirSync(shotsDir).filter((f) => f.endsWith(".png")) : [];
+  check("screenshots captured by the loop", shots.length > 0, `${shots.length} png files`);
+
+  const browserLog = existsSync(`${BROWSER_LOGDIR}/actions.jsonl`)
+    ? readFileSync(`${BROWSER_LOGDIR}/actions.jsonl`, "utf8")
+    : "";
+  check("browser tool calls logged", browserLog.includes('"tool":"browser"'));
+
+  if (shots.length > 0) {
+    // The supervisor reads screenshots from LOGS_DIR/screenshots, so it needs a
+    // supervisor pointed at the browser log dir. The phase 3 one still holds
+    // PORT_DASH, so give this one its own port instead of colliding silently.
+    const shotSupervisor = run(binary, [], {
+      SUPERVISOR_ADDR: `127.0.0.1:${PORT_SHOT_DASH}`,
+      WORKSPACE_DIR: `${SANDBOX}/workspace`,
+      MEMORY_DIR: `${SANDBOX}/memory`,
+      LOGS_DIR: BROWSER_LOGDIR,
+      STOP_FILE: `${SANDBOX}/STOP_BROWSER`,
+      ACTIONS_FILE: `${BROWSER_LOGDIR}/actions.jsonl`,
+      JOURNAL_FILE: `${SANDBOX}/memory/journal.md`,
+      STATE_FILE: `${SANDBOX}/memory/state-browser.json`,
+      TEMPLATE_DIR: `${ROOT}web/templates`,
+      MAX_BUDGET_USD: "100",
+      DASHBOARD_USER: "admin",
+      DASHBOARD_PASSWORD: "hunter2",
+    });
+    await sleep(1200);
+    try {
+      const res = await fetch(`http://127.0.0.1:${PORT_SHOT_DASH}/screenshot`, {
+        headers: { Authorization: authHeader },
+      });
+      const buf = Buffer.from(await res.arrayBuffer());
+      check("dashboard serves the screenshot", res.status === 200 && buf.length > 1000,
+        `${res.status}, ${buf.length} bytes`);
+    } catch (err) {
+      check("dashboard serves the screenshot", false, (err as Error).message);
+    }
+    shotSupervisor.kill("SIGTERM");
+    await sleep(300);
+  }
+}
 
 supervisor.kill("SIGTERM");
 fake.kill("SIGTERM");

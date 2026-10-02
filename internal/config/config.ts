@@ -43,6 +43,8 @@ export type Config = {
   enableBrowser: boolean;
   /** Playwright profile directory, defaults to workspace/.pw */
   browserProfileDir: string;
+  /** Background screenshot cadence, minutes. */
+  screenshotEveryMinutes: number;
 };
 
 function env(key: string): string {
@@ -105,6 +107,7 @@ export function loadConfig(): Config {
 
     enableBrowser: bool("ENABLE_BROWSER", false),
     browserProfileDir: env("BROWSER_PROFILE_DIR") || `${workspaceDir}/.pw`,
+    screenshotEveryMinutes: num("SCREENSHOT_EVERY_MINUTES", 5),
   };
 }
 
