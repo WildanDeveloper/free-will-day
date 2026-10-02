@@ -1,0 +1,20 @@
+[Unit]
+Description=Free Will Day supervisor and dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=supervisor
+WorkingDirectory=/opt/freewillday
+EnvironmentFile=/opt/freewillday/.env
+ExecStart=/opt/freewillday/bin/supervisor
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillSignal=SIGTERM
+StandardOutput=append:/var/log/freewillday/supervisor.out
+StandardError=append:/var/log/freewillday/supervisor.err
+
+[Install]
+WantedBy=multi-user.target

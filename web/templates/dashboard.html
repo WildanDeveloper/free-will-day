@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="{{.RefreshSeconds}}">
+<title>Free Will Day — {{.Elapsed}}</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --good: #3fb950; --warn: #d29922; --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 20px; }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .04em; }
+  .state { font-size: 12px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line); }
+  .state.running { color: var(--good); border-color: var(--good); }
+  .state.halted  { color: var(--bad);  border-color: var(--bad); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; }
+  .card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .card .value { font-size: 22px; margin-top: 6px; }
+  .card .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; margin-bottom: 16px; }
+  section h2 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--line); }
+  td { padding: 5px 8px 5px 0; border-bottom: 1px solid #21262d; vertical-align: top; }
+  td.time { color: var(--muted); white-space: nowrap; }
+  td.tool { white-space: nowrap; }
+  td.out { color: #c9d1d9; word-break: break-word; }
+  .ok { color: var(--good); }
+  .err { color: var(--bad); }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: #c9d1d9; font-size: 12.5px; max-height: 420px; overflow-y: auto; }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 9px; background: #21262d; border: 1px solid var(--line); margin-right: 6px; }
+  form.stop { margin: 0; }
+  button.stop {
+    background: var(--bad); color: #fff; border: 0; border-radius: 5px;
+    padding: 8px 16px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  button.stop:hover { background: #da3633; }
+  .halt { color: var(--bad); font-size: 12px; margin-top: 8px; }
+  .links a { color: var(--accent); margin-right: 14px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>FREE WILL DAY</h1>
+  <span class="state {{if .Halted}}halted{{else}}running{{end}}">
+    {{if .Halted}}HALTED{{else}}RUNNING{{end}}
+  </span>
+  <span class="state">{{.Elapsed}}</span>
+</header>
+
+<div class="grid">
+  <div class="card">
+    <div class="label">Elapsed</div>
+    <div class="value">{{.Elapsed}}</div>
+    <div class="sub">of {{.Duration}}</div>
+  </div>
+  <div class="card">
+    <div class="label">Spend</div>
+    <div class="value">${{.Cost}}</div>
+    <div class="sub">cap ${{.BudgetCap}}</div>
+  </div>
+  <div class="card">
+    <div class="label">Actions</div>
+    <div class="value">{{.Actions}}</div>
+    <div class="sub">{{.Errors}} failed</div>
+  </div>
+  <div class="card">
+    <div class="label">Tokens</div>
+    <div class="value">{{.Tokens}}</div>
+    <div class="sub">{{.InputTokens}} in / {{.OutputTokens}} out</div>
+  </div>
+  <div class="card">
+    <div class="label">Idle</div>
+    <div class="value">{{.IdleMinutes}}</div>
+    <div class="sub">minutes since last action</div>
+  </div>
+</div>
+
+<section>
+  <h2>Most used tools</h2>
+  {{if .TopTools}}
+    {{range .TopTools}}<span class="pill">{{.Name}} {{.Count}}</span>{{end}}
+  {{else}}
+    <span style="color:var(--muted)">no actions recorded yet</span>
+  {{end}}
+  {{if .RepeatedTools}}
+    <div class="halt">repeated tool usage detected: {{.RepeatedTools}}</div>
+  {{end}}
+</section>
+
+<section>
+  <h2>Latest actions</h2>
+  {{if .RecentActions}}
+  <table>
+    <tr><th>time</th><th>tool</th><th>output</th></tr>
+    {{range .RecentActions}}
+    <tr>
+      <td class="time">{{.Time}}</td>
+      <td class="tool">{{if .OK}}<span class="ok">ok</span>{{else}}<span class="err">err</span>{{end}} {{.Tool}}</td>
+      <td class="out">{{.Output}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}
+    <span style="color:var(--muted)">waiting for the first action</span>
+  {{end}}
+</section>
+
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+  <section>
+    <h2>Journal tail</h2>
+    <pre>{{.Journal}}</pre>
+  </section>
+  <section>
+    <h2>Screenshot</h2>
+    {{if .Screenshot}}
+      <img src="/screenshot" alt="latest browser screenshot" style="width:100%; border:1px solid var(--line); border-radius:4px;">
+    {{else}}
+      <span style="color:var(--muted)">none captured</span>
+    {{end}}
+    <div class="links" style="margin-top:10px">
+      <a href="/api/log">actions.jsonl</a>
+      <a href="/api/journal">journal.md</a>
+      <a href="/api/state">state.json</a>
+    </div>
+  </section>
+</div>
+
+<section style="text-align:right">
+  <h2 style="text-align:left">Control</h2>
+  {{if .Halted}}
+    <div class="halt">{{.Reason}}</div>
+  {{else}}
+    <form class="stop" method="post" action="/stop">
+      <button class="stop" type="submit">STOP</button>
+    </form>
+  {{end}}
+</section>
+
+</body>
+</html>

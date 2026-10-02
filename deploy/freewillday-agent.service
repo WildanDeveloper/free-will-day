@@ -1,0 +1,19 @@
+[Unit]
+Description=Free Will Day agent loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+WorkingDirectory=/opt/freewillday
+EnvironmentFile=/opt/freewillday/.env
+ExecStart=/usr/bin/node cmd/agent/main.ts
+Restart=no
+TimeoutStopSec=20
+KillSignal=SIGTERM
+StandardOutput=append:/var/log/freewillday/agent.out
+StandardError=append:/var/log/freewillday/agent.err
+
+[Install]
+WantedBy=multi-user.target

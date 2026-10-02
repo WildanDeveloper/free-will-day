@@ -1,0 +1,27 @@
+# Secrets: .env holds MODEL_API_KEY and dashboard credentials.
+.env
+.env.*
+!.env.example
+
+# Runtime state. The agent owns these at runtime, not in version control.
+memory/journal.md
+memory/state.json
+memory/*.md.tmp
+logs/
+workspace/*
+!workspace/.gitkeep
+
+# Build output and scratch
+bin/
+.smoke/
+var/
+node_modules/
+*.log
+
+# Editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Internal planning document, kept out of the public repo.
+road.md

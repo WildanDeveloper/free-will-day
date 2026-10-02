@@ -1,0 +1,19 @@
+{
+  "name": "freewillday",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Autonomous 24 hour agent run, monitored end to end.",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "agent": "node cmd/agent/main.ts",
+    "supervisor": "go run ./cmd/supervisor",
+    "build:supervisor": "go build -o bin/supervisor ./cmd/supervisor",
+    "check": "node scripts/check.ts",
+    "smoke": "node scripts/smoke.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
