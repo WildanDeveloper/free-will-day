@@ -127,8 +127,12 @@ export async function run(): Promise<number> {
     void browser?.captureQuietly();
   }, cfg.screenshotEveryMinutes * 60_000);
 
+  // Wall-clock end of the whole run, from state.json, so it survives a restart.
   const deadline = state.startedAt + parseDuration(cfg.runDuration);
-  const startedAt = Date.now();
+  // Optional per-process cap, for recycling the process mid-run. 0 disables it.
+  // This used to be a hardcoded 6 hours, which silently truncated a 24 hour run.
+  const processStartedAt = Date.now();
+  const processCapMs = cfg.maxProcessRuntimeMinutes * 60_000;
 
   const halt = (reason: string): number => {
     clearInterval(captureTimer);
@@ -164,7 +168,11 @@ export async function run(): Promise<number> {
       return halt(`budget reached: $${state.spentUsd.toFixed(4)}`);
     }
     if (Date.now() >= deadline) return halt("run duration reached");
-    if (Date.now() - startedAt > 21_600_000) return halt("local uptime safety cap");
+    if (processCapMs > 0 && Date.now() - processStartedAt > processCapMs) {
+      // Exit cleanly rather than crashing: state.json is checkpointed, so a
+      // supervisor restart resumes from the same deadline.
+      return halt(`process runtime cap reached (${cfg.maxProcessRuntimeMinutes}m)`);
+    }
 
     let result;
     try {

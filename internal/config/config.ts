@@ -29,6 +29,11 @@ export type Config = {
   summarizeEvery: number;
   /** Identical consecutive tool calls before the agent is nudged. */
   loopDetectionThreshold: number;
+  /**
+   * Minutes a single process may run before exiting cleanly, so a supervisor
+   * can recycle it mid-run. 0 disables the cap. Resumption is via state.json.
+   */
+  maxProcessRuntimeMinutes: number;
   /** Mandatory journal entry every N minutes. */
   journalEveryMinutes: number;
   /** Truncate tool output to this many characters before it enters context. */
@@ -99,6 +104,7 @@ export function loadConfig(): Config {
     contextActions: num("CONTEXT_ACTIONS", 20),
     summarizeEvery: num("SUMMARIZE_EVERY", 30),
     loopDetectionThreshold: num("LOOP_DETECTION_THRESHOLD", 3),
+    maxProcessRuntimeMinutes: num("MAX_PROCESS_RUNTIME_MINUTES", 0),
     journalEveryMinutes: num("JOURNAL_EVERY_MINUTES", 60),
     maxToolOutput: num("MAX_TOOL_OUTPUT", 4000),
 

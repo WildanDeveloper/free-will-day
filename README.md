@@ -144,6 +144,22 @@ are best effort: a failed webhook is logged and never blocks the run.
 
 Without the variable, alerting is off and every call is a no-op.
 
+## Surviving 24 hours
+
+- **Restarts.** The agent systemd unit uses `Restart=always`. `state.json` holds
+  an absolute deadline, so a restart continues the same run instead of starting
+  a fresh one. `StartLimitBurst=5` within 10 minutes stops a broken
+  configuration from spinning forever.
+- **Log reads are bounded.** `readRecent` reads only the tail of
+  `actions.jsonl`. A full run produces roughly 40MB; reading the whole file each
+  iteration would cost about 800GB of IO.
+- **Journal rotation.** Past 8MB the journal is trimmed to its newer half, cut at
+  an entry boundary. Only the tail is ever loaded into a prompt, so older text
+  was dead weight.
+- **Process recycling.** `MAX_PROCESS_RUNTIME_MINUTES` exits one process cleanly
+  after N minutes so a supervisor can recycle it. 0, the default, leaves a single
+  process running the full duration.
+
 ## Stop conditions
 
 Three, checked independently by both processes:

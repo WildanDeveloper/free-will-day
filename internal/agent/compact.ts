@@ -11,7 +11,13 @@
  * own goal six hours into a run: the summary is what preserves intent.
  */
 
-import { appendFileSync, readFileSync, existsSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import type { ModelClient } from "../llm/client.ts";
@@ -120,6 +126,35 @@ export function appendJournal(memoryDir: string, entry: string): void {
     `\n## ${stamp} — auto summary\n${entry.trim()}\n`,
     "utf8",
   );
+  rotateJournal(memoryDir);
+}
+
+/**
+ * Keep the journal from growing without bound over a 24 hour run. Only the
+ * newest portion is ever read into a prompt, so older text is dead weight on
+ * disk and a wasted read. One generation is kept.
+ */
+const JOURNAL_MAX_BYTES = 8 << 20; // 8MB
+
+export function rotateJournal(memoryDir: string): void {
+  const path = join(memoryDir, "journal.md");
+  let size: number;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return;
+  }
+  if (size <= JOURNAL_MAX_BYTES) return;
+
+  try {
+    const full = readFileSync(path, "utf8");
+    // Cut at a heading so entries are not left half-written.
+    const cut = full.lastIndexOf("\n## ", full.length - JOURNAL_MAX_BYTES / 2);
+    const kept = cut > 0 ? full.slice(cut) : full.slice(-JOURNAL_MAX_BYTES / 2);
+    writeFileSync(path, kept, "utf8");
+  } catch {
+    // Rotation is best effort; a failure here must not stop the run.
+  }
 }
 
 /**

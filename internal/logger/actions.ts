@@ -6,7 +6,14 @@
  * ts, type, and seq. The supervisor tolerates unknown fields.
  */
 
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+} from "node:fs";
 import { dirname } from "node:path";
 
 export type ActionRecord = {
@@ -45,22 +52,49 @@ export class ActionLog {
   }
 }
 
-/** Read the last n records. Used to rebuild context after a restart. */
-export function readRecent(file: string, n: number): ActionRecord[] {
-  let text: string;
+/**
+ * Read the last n records.
+ *
+ * Reads only the tail of the file. A 24 hour run produces tens of thousands of
+ * records, and reading the whole log on every iteration would mean hundreds of
+ * gigabytes of IO for no reason.
+ */
+export function readRecent(file: string, n: number, tailBytes = 4 << 20): ActionRecord[] {
+  let fd: number;
   try {
-    text = readFileSync(file, "utf8");
+    fd = openSync(file, "r");
   } catch {
     return [];
   }
-  const lines = text.split("\n").filter(Boolean);
-  const out: ActionRecord[] = [];
-  for (const line of lines.slice(-n * 4)) {
-    try {
-      out.push(JSON.parse(line) as ActionRecord);
-    } catch {
-      // A partially flushed final line is expected after a crash. Skip it.
+
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return [];
+
+    // A record can be large, so read back further than n records would need.
+    const want = Math.min(size, Math.max(tailBytes, n * 4096));
+    const buffer = Buffer.allocUnsafe(want);
+    const read = readSync(fd, buffer, 0, want, size - want);
+    if (read <= 0) return [];
+
+    let text = buffer.toString("utf8", 0, read);
+    // The cut point usually lands mid-line; drop the partial first line.
+    const firstNewline = text.indexOf("\n");
+    text = firstNewline >= 0 ? text.slice(firstNewline + 1) : text;
+
+    const out: ActionRecord[] = [];
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      try {
+        out.push(JSON.parse(line) as ActionRecord);
+      } catch {
+        // A partially flushed final line is expected after a crash. Skip it.
+      }
     }
+    return out.slice(-n);
+  } catch {
+    return [];
+  } finally {
+    closeSync(fd);
   }
-  return out.slice(-n);
 }

@@ -9,7 +9,18 @@ User=agent
 WorkingDirectory=/opt/freewillday
 EnvironmentFile=/opt/freewillday/.env
 ExecStart=/usr/bin/node cmd/agent/main.ts
-Restart=no
+
+# Always restart. A 24 hour run will hit a transient failure sooner or later,
+# and state.json plus actions.jsonl make resuming cheap: the deadline is
+# absolute, so a restart continues the same run rather than starting a new one.
+Restart=always
+RestartSec=10
+
+# Give up after 5 failures within 10 minutes, so a hard-failing configuration
+# does not spin forever. Survive a long outage though.
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
 TimeoutStopSec=20
 KillSignal=SIGTERM
 StandardOutput=append:/var/log/freewillday/agent.out
