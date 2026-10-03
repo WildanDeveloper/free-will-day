@@ -61,24 +61,24 @@ export async function compactWindow(opts: {
     .join("\n\n");
 
   const prompt =
-    `Summarise this stretch of autonomous work for your own future self.\n\n` +
-    `The conversation is about to be discarded. Your journal is the only thing\n` +
-    `that survives, so write for someone who has no memory of this stretch.\n\n` +
-    `Cover, briefly:\n` +
-    `- what was actually accomplished, and whether it worked\n` +
-    `- anything that surprised you, failed repeatedly, or looks like a dead end\n` +
-    `- what you were in the middle of doing\n` +
-    `- what you want to do next\n\n` +
-    `Be concrete: name files, commands, and findings. No preamble.\n\n` +
-    `## actions (${actionCount} since last summary)\n${transcript}`;
+    `Write a note to yourself for later. The conversation is about to be\n` +
+    `discarded and only this will survive.\n\n` +
+    `Write for someone who has no memory of the stretch below. If nothing\n` +
+    `worth recording happened, say that in one line. Do not manufacture\n` +
+    `interest, and do not pretend you were busy if you were not.\n\n` +
+    `If there is anything to record, you might mention what happened, whether\n` +
+    `it worked, and what you felt like doing next. There is no requirement to\n` +
+    `have a plan.\n\n` +
+    `## the stretch (${actionCount} actions)\n${transcript}`;
 
   let summary: string;
   let costUsd: number;
   try {
     const result = await client.chat({
       system:
-        "You are the same agent that performed these actions. Write a factual " +
-        "hand-off note to yourself. Plain text, no headings.",
+        "You are the same agent that performed these actions. Write a short " +
+        "note to yourself in plain text. Honesty matters more than length: if " +
+        "the stretch was empty or repetitive, say so.",
       messages: [{ role: "user", content: prompt }],
       tools: [],
       maxTokens: 1024,

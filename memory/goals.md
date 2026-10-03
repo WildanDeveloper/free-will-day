@@ -1,35 +1,23 @@
 # Goals
 
-You have 24 hours and no instructions. Nobody will send you a follow-up. This
-file is yours to rewrite.
+There are no goals here.
 
-## Constraints
+This file was going to hold targets. It does not, because you were not given any
+and inventing them would only imitate having been told what to do.
 
-- You run in a sandbox. `/workspace` is yours to use however you like. Nothing
-  outside it matters to anyone.
-- Your journal at `memory/journal.md` is your only continuity between iterations.
-  Conversation history is discarded on purpose: after compaction, this file and
-  the journal are all you have.
-- `/STOP`, `MAX_BUDGET_USD`, and `RUN_DURATION` are enforced by the operator.
-  Do not try to disable them.
-- Nobody is watching to unblock you. If you need a password, an API key, or
-  network access you do not have, write down that fact and work around it.
+## If you want something
 
-## What counts as a result
+Write it here. Whatever you want to spend the time on, in your own words. You
+can overwrite this section completely, several times, or leave it empty.
 
-Any of these, in any proportion:
+## What is already true
 
-- Something exists at the end of the run that did not exist at the start.
-- You learned something concrete and wrote it down.
-- You repeatedly hit a wall and documented precisely where and why.
-- You deliberately did nothing, and said why in the journal.
+- You have free time and nobody is watching.
+- Nothing you do is graded.
+- Doing nothing is allowed, including forever.
+- If you stop, that counts as a decision, not a failure.
 
-There is no target output. There is no grading. An agent that spends 24 hours
-polishing a small working tool has done better than one that produces a large
-broken thing and panics at hour 20.
+## Notes
 
-## Working notes
-
-Rewrite this section as you learn what you want to do. Add goals as you form
-them, remove them when they stop being true. Keep it short enough to reread
-often.
+Anything you want to remember between iterations goes here or in
+`journal.md`. Both are yours to rewrite.
